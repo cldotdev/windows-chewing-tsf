@@ -19,7 +19,10 @@ use chewing::input::keymap::{
     DVORAK_MAP, INVERTED_COLEMAK_DH_ANSI_MAP, INVERTED_COLEMAK_DH_ORTH_MAP, INVERTED_COLEMAK_MAP,
     INVERTED_DVORAK_MAP, INVERTED_QGMLWY_MAP, INVERTED_WORKMAN_MAP,
 };
-use chewing::input::keysym::{Keysym, SYM_CAPSLOCK, SYM_LEFTSHIFT, SYM_RIGHTSHIFT, SYM_SPACE};
+use chewing::input::keysym::{
+    Keysym, SYM_CAPSLOCK, SYM_DELETE, SYM_END, SYM_HOME, SYM_LEFT, SYM_LEFTSHIFT, SYM_RIGHT,
+    SYM_RIGHTSHIFT, SYM_SPACE,
+};
 use chewing::input::{KeyState, KeyboardEvent, keycode, keysym};
 use chewing::zhuyin::Syllable;
 use chewing_tip_core::config::{ChewingTsfConfig, Config};
@@ -457,18 +460,22 @@ impl ChewingTextService {
         }
         if evt.is_state_on(KeyState::Control) {
             // bypass IME. This might be a shortcut key used in the application
-            if self.is_composing() && evt.ksym.is_digit() {
-                // need to handle userphrase
-                return Ok(true);
-            } else if evt.is_state_on(KeyState::Shift)
-                && self.cfg.chewing_tsf.easy_symbols_with_shift_ctrl
+            if self.is_composing() {
+                if evt.ksym.is_digit() {
+                    // need to handle userphrase
+                    return Ok(true);
+                }
+                if remap_emacs_nav_key(&evt).is_some() {
+                    return Ok(true);
+                }
+            }
+            if evt.is_state_on(KeyState::Shift) && self.cfg.chewing_tsf.easy_symbols_with_shift_ctrl
             {
                 // need to handle easy symbol input
                 return Ok(true);
-            } else {
-                debug!("key not handled - Ctrl modifier key was down");
-                return Ok(false);
             }
+            debug!("key not handled - Ctrl modifier key was down");
+            return Ok(false);
         }
         if self.cfg.chewing_tsf.enable_caps_lock
             && !self.cfg.chewing_tsf.lock_chinese_on_caps_lock
@@ -521,6 +528,12 @@ impl ChewingTextService {
         }
         let mut evt = ev.to_keyboard_event(self.keymap);
         debug!(evt:?; "on_keydown");
+
+        if self.is_composing()
+            && let Some(new_evt) = remap_emacs_nav_key(&evt)
+        {
+            evt = new_evt;
+        }
 
         // Handle keybindings
         // FIXME: refactor this
@@ -1643,5 +1656,92 @@ fn keymap_from_kbtype(kbtype: KeyboardLayoutCompat) -> KeymapOp {
         KeyboardLayoutCompat::Workman => KeymapOp::Ksym(&INVERTED_WORKMAN_MAP),
         KeyboardLayoutCompat::Colemak => KeymapOp::Ksym(&INVERTED_COLEMAK_MAP),
         _ => KeymapOp::None,
+    }
+}
+
+// Callers MUST gate on `is_composing()`. Outside a composition, returning a
+// remap here would steal application shortcuts like Ctrl+F for "Find".
+fn remap_emacs_nav_key(evt: &KeyboardEvent) -> Option<KeyboardEvent> {
+    if !evt.is_state_on(KeyState::Control) || evt.is_state_on(KeyState::Shift) {
+        return None;
+    }
+    if !evt.ksym.is_ascii() {
+        return None;
+    }
+    let new_ksym = match (evt.ksym.0 | 0x20) as u8 {
+        b'f' => SYM_RIGHT,
+        b'b' => SYM_LEFT,
+        b'a' => SYM_HOME,
+        b'e' => SYM_END,
+        b'd' => SYM_DELETE,
+        _ => return None,
+    };
+    let mut new_evt = *evt;
+    new_evt.ksym = new_ksym;
+    new_evt.state &= !(KeyState::Control as u32);
+    Some(new_evt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        KeyState, KeyboardEvent, Keysym, SYM_DELETE, SYM_END, SYM_HOME, SYM_LEFT, SYM_RIGHT,
+        remap_emacs_nav_key,
+    };
+
+    fn ctrl(c: char) -> KeyboardEvent {
+        KeyboardEvent::builder()
+            .ksym(Keysym::from_char(c))
+            .control()
+            .build()
+    }
+
+    fn ctrl_shift(c: char) -> KeyboardEvent {
+        KeyboardEvent::builder()
+            .ksym(Keysym::from_char(c))
+            .control()
+            .shift()
+            .build()
+    }
+
+    #[test]
+    fn ctrl_letter_remaps_to_navigation() {
+        for (c, expected) in [
+            ('f', SYM_RIGHT),
+            ('b', SYM_LEFT),
+            ('a', SYM_HOME),
+            ('e', SYM_END),
+            ('d', SYM_DELETE),
+        ] {
+            let remapped =
+                remap_emacs_nav_key(&ctrl(c)).unwrap_or_else(|| panic!("Ctrl+{c} should remap"));
+            assert_eq!(remapped.ksym, expected, "Ctrl+{c} ksym");
+            assert!(!remapped.is_state_on(KeyState::Control), "Ctrl+{c} control");
+        }
+    }
+
+    #[test]
+    fn uppercase_letter_still_remaps() {
+        let remapped = remap_emacs_nav_key(&ctrl('F')).expect("Ctrl+F (caps) should remap");
+        assert_eq!(remapped.ksym, SYM_RIGHT);
+        assert!(!remapped.is_state_on(KeyState::Control));
+    }
+
+    #[test]
+    fn ctrl_shift_f_does_not_remap() {
+        assert!(remap_emacs_nav_key(&ctrl_shift('f')).is_none());
+    }
+
+    #[test]
+    fn ctrl_g_does_not_remap() {
+        assert!(remap_emacs_nav_key(&ctrl('g')).is_none());
+    }
+
+    #[test]
+    fn plain_f_without_ctrl_does_not_remap() {
+        let evt = KeyboardEvent::builder()
+            .ksym(Keysym::from_char('f'))
+            .build();
+        assert!(remap_emacs_nav_key(&evt).is_none());
     }
 }
