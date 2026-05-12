@@ -32,7 +32,8 @@ use chewing::zhuyin::Syllable;
 use log::{debug, error, info};
 use windows::Foundation::Uri;
 use windows::System::Launcher;
-use windows::Win32::Foundation::{GetLastError, HINSTANCE, POINT, RECT};
+use windows::Win32::Foundation::{GetLastError, HINSTANCE, POINT, RECT, TRUE};
+use windows::Win32::Graphics::Gdi::COLOR_HIGHLIGHT;
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_HIDDEN, FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW,
 };
@@ -41,9 +42,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows::Win32::UI::TextServices::{
     GUID_COMPARTMENT_EMPTYCONTEXT, GUID_COMPARTMENT_KEYBOARD_DISABLED,
     GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, GUID_LBI_INPUTMODE, ITfCompartmentMgr, ITfCompositionSink,
-    ITfContext, TF_ATTR_INPUT, TF_DISPLAYATTRIBUTE, TF_ES_ASYNC, TF_ES_READ, TF_ES_READWRITE,
-    TF_ES_SYNC, TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_BTN_MENU, TF_LS_DOT, TF_LS_SOLID,
-    TF_SD_READONLY,
+    ITfContext, TF_ATTR_INPUT, TF_ATTR_TARGET_CONVERTED, TF_CT_SYSCOLOR, TF_DA_COLOR,
+    TF_DA_COLOR_0, TF_DISPLAYATTRIBUTE, TF_ES_ASYNC, TF_ES_READ, TF_ES_READWRITE, TF_ES_SYNC,
+    TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_BTN_MENU, TF_LS_DOT, TF_LS_SOLID, TF_SD_READONLY,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfLangBarItemButton, ITfLangBarItemMgr, ITfThreadMgr,
@@ -65,6 +66,7 @@ use crate::text_service::lang_bar::LangBarFactory;
 use crate::ui::window::window_register_class;
 
 use super::CommandType;
+use super::GUID_CURSOR_DISPLAY_ATTRIBUTE;
 use super::GUID_INPUT_DISPLAY_ATTRIBUTE_1;
 use super::GUID_INPUT_DISPLAY_ATTRIBUTE_2;
 use super::display_attribute::register_display_attribute;
@@ -148,10 +150,32 @@ impl PartialEq<LanguageMode> for TsfLangMode {
     }
 }
 
+fn composition_cursor_marker(
+    preedit_len: usize,
+    cursor: usize,
+    bopomofo_len: usize,
+) -> Option<(usize, usize)> {
+    if preedit_len == 0 {
+        return None;
+    }
+    if bopomofo_len > 0 {
+        let end = cursor.checked_add(bopomofo_len)?;
+        if end <= preedit_len {
+            return Some((cursor, end));
+        }
+    }
+    if cursor < preedit_len {
+        Some((cursor, cursor + 1))
+    } else {
+        Some((preedit_len - 1, preedit_len))
+    }
+}
+
 pub(super) struct CompositionString {
     pub(super) commit: String,
     pub(super) preedit: String,
     pub(super) segments: Vec<(usize, usize)>,
+    pub(super) cursor_marker: Option<(usize, usize)>,
     pub(super) cursor: usize,
 }
 
@@ -159,6 +183,7 @@ pub(super) struct ChewingTextService {
     thread_mgr: ITfThreadMgr,
     tid: u32,
     input_da_atom: [VARIANT; 2],
+    cursor_da_atom: VARIANT,
     _menu: Menu,
     popup_menu: HMENU,
     lang_bar_buttons: Vec<ITfLangBarItemButton>,
@@ -202,6 +227,19 @@ impl ChewingTextService {
             ..Default::default()
         };
         let input_da_atom_2 = register_display_attribute(&GUID_INPUT_DISPLAY_ATTRIBUTE_2, da)?;
+        let cursor_da = TF_DISPLAYATTRIBUTE {
+            lsStyle: TF_LS_SOLID,
+            fBoldLine: TRUE,
+            crLine: TF_DA_COLOR {
+                r#type: TF_CT_SYSCOLOR,
+                Anonymous: TF_DA_COLOR_0 {
+                    nIndex: COLOR_HIGHLIGHT.0,
+                },
+            },
+            bAttr: TF_ATTR_TARGET_CONVERTED,
+            ..Default::default()
+        };
+        let cursor_da_atom = register_display_attribute(&GUID_CURSOR_DISPLAY_ATTRIBUTE, cursor_da)?;
 
         let g_hinstance = HINSTANCE(G_HINSTANCE.load(Ordering::Relaxed) as *mut c_void);
         let menu = Menu::load(g_hinstance, IDR_MENU);
@@ -280,6 +318,7 @@ impl ChewingTextService {
             tid,
             composition_sink: ts.cast()?,
             input_da_atom: [input_da_atom_1, input_da_atom_2],
+            cursor_da_atom,
             _menu: menu,
             popup_menu,
             lang_mode: Cell::new(TsfLangMode::English),
@@ -898,7 +937,7 @@ impl ChewingTextService {
                     let context = doc_mgr
                         .GetTop()
                         .context("failed to get current ITfContext")?;
-                    self.set_composition_string(&context, &commit, "", vec![], 0)?;
+                    self.set_composition_string(&context, &commit, "", vec![], None, 0)?;
                     self.end_composition(&context)?;
                 }
                 debug!("commit string ok");
@@ -1021,11 +1060,20 @@ impl ChewingTextService {
 
         // has something in composition buffer
         if !composition_buf.is_empty() {
-            self.set_composition_string(context, &commit, &composition_buf, segments, cursor)?;
+            let cursor_marker =
+                composition_cursor_marker(composition_buf.chars().count(), cursor, bopomofo_len);
+            self.set_composition_string(
+                context,
+                &commit,
+                &composition_buf,
+                segments,
+                cursor_marker,
+                cursor,
+            )?;
         } else {
             // nothing left in composition buffer, terminate composition status
             if self.is_composing() {
-                self.set_composition_string(context, &commit, "", vec![], 0)?;
+                self.set_composition_string(context, &commit, "", vec![], None, 0)?;
             }
             // We also need to make sure that the candidate window is not
             // currently shown. When typing symbols with ` key, it's possible
@@ -1071,6 +1119,7 @@ impl ChewingTextService {
         commit: &str,
         preedit: &str,
         segments: Vec<(usize, usize)>,
+        cursor_marker: Option<(usize, usize)>,
         cursor: usize,
     ) -> Result<()> {
         debug!(commit, preedit; "set composition string");
@@ -1090,6 +1139,7 @@ impl ChewingTextService {
                 commit,
                 preedit,
                 segments,
+                cursor_marker,
                 cursor,
             }));
         } else {
@@ -1097,6 +1147,7 @@ impl ChewingTextService {
                 commit,
                 preedit,
                 segments,
+                cursor_marker,
                 cursor,
             })));
             let session = SetCompositionString::new(
@@ -1104,6 +1155,7 @@ impl ChewingTextService {
                 self.composition.clone(),
                 self.composition_sink.clone(),
                 self.input_da_atom.clone(),
+                self.cursor_da_atom.clone(),
                 pending.clone(),
             )
             .into_object();
@@ -1750,7 +1802,7 @@ fn remap_emacs_nav_key(evt: &KeyboardEvent) -> Option<KeyboardEvent> {
 mod tests {
     use super::{
         KeyState, KeyboardEvent, Keysym, SYM_DELETE, SYM_END, SYM_HOME, SYM_LEFT, SYM_RIGHT,
-        remap_emacs_nav_key,
+        composition_cursor_marker, remap_emacs_nav_key,
     };
 
     fn ctrl(c: char) -> KeyboardEvent {
@@ -1807,5 +1859,25 @@ mod tests {
             .ksym(Keysym::from_char('f'))
             .build();
         assert!(remap_emacs_nav_key(&evt).is_none());
+    }
+
+    #[test]
+    fn cursor_marker_prefers_bopomofo_buffer() {
+        assert_eq!(Some((1, 3)), composition_cursor_marker(4, 1, 2));
+    }
+
+    #[test]
+    fn cursor_marker_uses_next_char_without_bopomofo() {
+        assert_eq!(Some((1, 2)), composition_cursor_marker(3, 1, 0));
+    }
+
+    #[test]
+    fn cursor_marker_uses_previous_char_at_end() {
+        assert_eq!(Some((2, 3)), composition_cursor_marker(3, 3, 0));
+    }
+
+    #[test]
+    fn cursor_marker_ignores_empty_preedit() {
+        assert_eq!(None, composition_cursor_marker(0, 0, 0));
     }
 }

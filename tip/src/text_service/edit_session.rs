@@ -54,6 +54,17 @@ fn set_selection(
     result
 }
 
+unsafe fn make_sub_range(range: &ITfRange, ec: u32, start: i32, end: i32) -> Result<ITfRange> {
+    unsafe {
+        let sub = range.Clone()?;
+        let mut moved = 0;
+        sub.Collapse(ec, TF_ANCHOR_START)?;
+        sub.ShiftEnd(ec, end, &mut moved, ptr::null())?;
+        sub.ShiftStart(ec, start, &mut moved, ptr::null())?;
+        Ok(sub)
+    }
+}
+
 #[implement(ITfEditSession)]
 pub(super) struct InsertText {
     context: ITfContext,
@@ -88,6 +99,7 @@ pub(super) struct SetCompositionString {
     composition: Rc<RefCell<Option<ITfComposition>>>,
     composition_sink: ITfCompositionSink,
     da_atom: [VARIANT; 2],
+    cursor_da_atom: VARIANT,
     pending: Rc<RefCell<Option<CompositionString>>>,
 }
 
@@ -97,6 +109,7 @@ impl SetCompositionString {
         composition: Rc<RefCell<Option<ITfComposition>>>,
         composition_sink: ITfCompositionSink,
         da_atom: [VARIANT; 2],
+        cursor_da_atom: VARIANT,
         pending: Rc<RefCell<Option<CompositionString>>>,
     ) -> SetCompositionString {
         Self {
@@ -104,6 +117,7 @@ impl SetCompositionString {
             composition,
             composition_sink,
             da_atom,
+            cursor_da_atom,
             pending,
         }
     }
@@ -147,24 +161,27 @@ impl ITfEditSession_Impl for SetCompositionString_Impl {
                 )?;
                 composition.ShiftStart(ec, &range)?;
                 let disp_attr_prop = self.context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
-                let mut atoms = self.da_atom.iter().cycle();
-                for seg in &pending.segments {
-                    let segment_range = range.Clone()?;
-                    segment_range.Collapse(ec, TF_ANCHOR_START)?;
-                    segment_range.ShiftEnd(ec, seg.1 as i32, &mut moved, ptr::null())?;
-                    segment_range.ShiftStart(ec, seg.0 as i32, &mut moved, ptr::null())?;
-                    if let Err(error) =
-                        disp_attr_prop.SetValue(ec, &segment_range, atoms.next().unwrap())
-                    {
+                for (seg, atom) in pending
+                    .segments
+                    .iter()
+                    .zip(self.da_atom.iter().cycle())
+                {
+                    let segment_range = make_sub_range(&range, ec, seg.0 as i32, seg.1 as i32)?;
+                    if let Err(error) = disp_attr_prop.SetValue(ec, &segment_range, atom) {
                         error!("set display attribute failed: {error}");
                     }
                 }
+                if let Some((start, end)) = pending.cursor_marker {
+                    let marker_range = make_sub_range(&range, ec, start as i32, end as i32)?;
+                    if let Err(error) =
+                        disp_attr_prop.SetValue(ec, &marker_range, &self.cursor_da_atom)
+                    {
+                        error!("set cursor display attribute failed: {error}");
+                    }
+                }
 
-                let cursor_range = range.Clone()?;
-                let mut moved = 0;
-                cursor_range.Collapse(ec, TF_ANCHOR_START)?;
-                cursor_range.ShiftEnd(ec, pending.cursor as i32, &mut moved, ptr::null())?;
-                cursor_range.ShiftStart(ec, pending.cursor as i32, &mut moved, ptr::null())?;
+                let cursor = pending.cursor as i32;
+                let cursor_range = make_sub_range(&range, ec, cursor, cursor)?;
                 set_selection(&self.context, ec, cursor_range, TF_AE_END)?;
             }
         }
