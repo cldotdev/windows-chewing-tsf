@@ -311,10 +311,12 @@ impl Config {
             cfg.modified_timestamp = value;
         }
         if let Ok(values) = key.get_multi_string("Keybind") {
-            cfg.keybind = values
+            let loaded: Vec<KeybindValue> = values
                 .into_iter()
                 .flat_map(|value| KeybindValue::from_str(&value))
                 .collect();
+            let defaults = std::mem::take(&mut cfg.keybind);
+            cfg.keybind = merge_missing_keybinds(loaded, defaults);
         }
 
         Ok(Config {
@@ -470,7 +472,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct KeybindValue {
     pub key: String,
     pub action: String,
@@ -507,6 +509,24 @@ impl Display for KeybindValue {
         }
         Ok(())
     }
+}
+
+/// Append default bindings for any action not present in `keybind`.
+///
+/// The registry `Keybind` value replaces the defaults wholesale on load, so a
+/// config saved by an older version is missing keybinding actions added since.
+/// Restoring the defaults for absent actions lets new default bindings reach
+/// users with an existing config while preserving their customized bindings.
+fn merge_missing_keybinds(
+    mut keybind: Vec<KeybindValue>,
+    defaults: Vec<KeybindValue>,
+) -> Vec<KeybindValue> {
+    for default in defaults {
+        if !keybind.iter().any(|kb| kb.action == default.action) {
+            keybind.push(default);
+        }
+    }
+    keybind
 }
 
 fn grant_app_container_access(object: PCWSTR, typ: SE_OBJECT_TYPE, access: u32) -> Result<()> {
@@ -648,7 +668,7 @@ pub fn color_s(rgb: &str) -> D2D1_COLOR_F {
 mod test {
     use crate::config::KeybindValue;
 
-    use super::{color_f, color_s};
+    use super::{ChewingTsfConfig, color_f, color_s, merge_missing_keybinds};
 
     #[test]
     fn color_rgb() {
@@ -684,5 +704,28 @@ mod test {
         let keybind = "ctrl+c=text:酷";
         let value: KeybindValue = keybind.parse().unwrap();
         assert_eq!(keybind, value.to_string());
+    }
+    #[test]
+    fn merge_keybind_adds_missing_default_action() {
+        // Simulate a config saved before `selecting_prev_page` was a default.
+        let saved: Vec<KeybindValue> = ChewingTsfConfig::default()
+            .keybind
+            .iter()
+            .filter(|kb| kb.action != "selecting_prev_page")
+            .cloned()
+            .collect();
+        assert!(!saved.iter().any(|kb| kb.action == "selecting_prev_page"));
+
+        let merged = merge_missing_keybinds(saved, ChewingTsfConfig::default().keybind);
+
+        // The new default action is restored without duplicating existing ones.
+        assert!(merged.iter().any(|kb| kb.action == "selecting_prev_page"));
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|kb| kb.action == "toggle_simplified_chinese")
+                .count(),
+            1
+        );
     }
 }
