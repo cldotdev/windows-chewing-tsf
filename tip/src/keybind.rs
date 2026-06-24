@@ -107,7 +107,7 @@ fn keysym_from_str(s: &str) -> Option<Keysym> {
 mod tests {
     use chewing::input::{
         KeyboardEvent,
-        keysym::{Keysym, SYM_F12, SYM_LEFTALT, SYM_LEFTCTRL},
+        keysym::{Keysym, SYM_F12, SYM_LEFTALT, SYM_LEFTCTRL, SYM_SPACE},
     };
 
     use super::KeybindValue;
@@ -179,5 +179,20 @@ mod tests {
             )
         );
         assert!(!keybinding.matches(&KeyboardEvent::builder().ksym(SYM_LEFTALT).shift().build()));
+    }
+    #[test]
+    fn match_shift_space() {
+        let target = Some(KeyboardEvent::builder().ksym(SYM_SPACE).shift().build());
+        assert_eq!(target, key_from_str("Shift+Space"));
+        assert_eq!(target, key_from_str("shift+Space"));
+        let keybinding = Keybinding::try_from(&KeybindValue {
+            key: "Shift+Space".to_string(),
+            action: "selecting_prev_page".to_string(),
+            param: "".to_string(),
+        })
+        .unwrap();
+        assert!(keybinding.matches(&target.unwrap()));
+        // Plain Space without Shift must not match the Shift+Space binding.
+        assert!(!keybinding.matches(&KeyboardEvent::builder().ksym(SYM_SPACE).build()));
     }
 }

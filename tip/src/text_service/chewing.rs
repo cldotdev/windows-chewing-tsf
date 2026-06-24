@@ -568,6 +568,7 @@ impl ChewingTextService {
         // Handle keybindings
         // FIXME: refactor this
         let mut text_action = None;
+        let mut selecting_nav_ksym = None;
         if let Some(keybinding) = self.keybindings.iter().find(|kb| kb.matches(&evt)) {
             debug!("matched keybinding on action={}", keybinding.action);
             let mut handled = true;
@@ -586,7 +587,13 @@ impl ChewingTextService {
                     handled = false;
                 }
                 act => {
-                    if act.starts_with("selecting_") {
+                    // libchewing rejects keys combined with Shift while
+                    // selecting, so map the page-up binding to a bare PageUp
+                    // event instead of forwarding the keypress.
+                    if act == "selecting_prev_page" && self.chewing_editor.is_selecting() {
+                        selecting_nav_ksym = Some(keysym::SYM_PAGEUP);
+                        handled = false;
+                    } else if act.starts_with("selecting_") {
                         handled = false;
                     } else {
                         error!("Unsupported keybinding action: {act}");
@@ -598,7 +605,12 @@ impl ChewingTextService {
             }
         }
 
-        if text_action.is_some() {
+        if let Some(ksym) = selecting_nav_ksym {
+            let mut nav_evt = evt;
+            nav_evt.ksym = ksym;
+            nav_evt.state &= !(KeyState::Shift as u32 | KeyState::Control as u32);
+            self.chewing_editor.process_keyevent(nav_evt);
+        } else if text_action.is_some() {
             // do nothing, handled later
         } else if evt.ksym.is_unicode() {
             let mut momentary_english_mode = false;

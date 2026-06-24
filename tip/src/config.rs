@@ -140,6 +140,11 @@ impl Default for ChewingTsfConfig {
                     action: "selecting_unlearn_phrase".to_string(),
                     param: "".to_string(),
                 },
+                KeybindValue {
+                    key: "Shift+Space".to_string(),
+                    action: "selecting_prev_page".to_string(),
+                    param: "".to_string(),
+                },
             ],
             auto_check_update_channel: "stable".to_string(),
             update_info_url: "".to_string(),
