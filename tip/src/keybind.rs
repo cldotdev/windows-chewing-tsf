@@ -27,6 +27,13 @@ impl TryFrom<&KeybindValue> for Keybinding {
 }
 
 impl Keybinding {
+    /// Actions in the `selecting_` family do nothing unless the candidate list
+    /// is open. The text service must not claim their keys otherwise, or the
+    /// application will never see them.
+    pub(crate) fn is_applicable(&self, is_selecting: bool) -> bool {
+        is_selecting || !self.action.starts_with("selecting_")
+    }
+
     pub(crate) fn matches(&self, evt: &KeyboardEvent) -> bool {
         (self.key.ksym == evt.ksym || self.key.ksym == SYM_NONE)
             && [
@@ -194,5 +201,27 @@ mod tests {
         assert!(keybinding.matches(&target.unwrap()));
         // Plain Space without Shift must not match the Shift+Space binding.
         assert!(!keybinding.matches(&KeyboardEvent::builder().ksym(SYM_SPACE).build()));
+    }
+    #[test]
+    fn selecting_action_applies_only_while_selecting() {
+        let keybinding = Keybinding::try_from(&KeybindValue {
+            key: "Shift+Space".to_string(),
+            action: "selecting_prev_page".to_string(),
+            param: "".to_string(),
+        })
+        .unwrap();
+        assert!(keybinding.is_applicable(true));
+        assert!(!keybinding.is_applicable(false));
+    }
+    #[test]
+    fn other_action_always_applies() {
+        let keybinding = Keybinding::try_from(&KeybindValue {
+            key: "Ctrl+F12".to_string(),
+            action: "toggle_simplified_chinese".to_string(),
+            param: "".to_string(),
+        })
+        .unwrap();
+        assert!(keybinding.is_applicable(true));
+        assert!(keybinding.is_applicable(false));
     }
 }

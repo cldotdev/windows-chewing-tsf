@@ -443,7 +443,11 @@ impl ChewingTextService {
         //
         // Step 2.2 handle any keybindings
         //
-        if self.keybindings.iter().any(|kb| kb.matches(&evt)) {
+        if self
+            .keybindings
+            .iter()
+            .any(|kb| kb.matches(&evt) && kb.is_applicable(self.chewing_editor.is_selecting()))
+        {
             return Ok(true);
         }
         //
@@ -516,15 +520,22 @@ impl ChewingTextService {
         }
         if !self.is_composing() {
             let shape_mode = self.chewing_editor.editor_options().character_form;
+            // Shift+Space has no meaning of its own once the fullwidth toggle
+            // key is disabled, so leave it to the application, which may use it
+            // for something else, such as scrolling the page up.
+            if evt.ksym == SYM_SPACE
+                && evt.is_state_on(KeyState::Shift)
+                && !self.cfg.chewing_tsf.enable_fullwidth_toggle_key
+            {
+                debug!("key not handled - fullwidth toggle key is disabled");
+                return Ok(false);
+            }
             // don't do further handling in pure English + half shape mode
             if self.lang_mode.get() == LanguageMode::English
                 && shape_mode == CharacterForm::Halfwidth
                 && !simulate_english_layout
             {
-                if evt.ksym == SYM_SPACE
-                    && evt.is_state_on(KeyState::Shift)
-                    && self.cfg.chewing_tsf.enable_fullwidth_toggle_key
-                {
+                if evt.ksym == SYM_SPACE && evt.is_state_on(KeyState::Shift) {
                     // need to handle fullwidth mode switch
                     return Ok(true);
                 } else {
@@ -569,7 +580,11 @@ impl ChewingTextService {
         // FIXME: refactor this
         let mut text_action = None;
         let mut selecting_nav_ksym = None;
-        if let Some(keybinding) = self.keybindings.iter().find(|kb| kb.matches(&evt)) {
+        if let Some(keybinding) = self
+            .keybindings
+            .iter()
+            .find(|kb| kb.matches(&evt) && kb.is_applicable(self.chewing_editor.is_selecting()))
+        {
             debug!("matched keybinding on action={}", keybinding.action);
             let mut handled = true;
             match keybinding.action.as_str() {
@@ -590,7 +605,7 @@ impl ChewingTextService {
                     // libchewing rejects keys combined with Shift while
                     // selecting, so map the page-up binding to a bare PageUp
                     // event instead of forwarding the keypress.
-                    if act == "selecting_prev_page" && self.chewing_editor.is_selecting() {
+                    if act == "selecting_prev_page" {
                         selecting_nav_ksym = Some(keysym::SYM_PAGEUP);
                         handled = false;
                     } else if act.starts_with("selecting_") {
