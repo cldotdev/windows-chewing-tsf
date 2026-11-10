@@ -58,7 +58,7 @@ jobs:
       - name: Generate version info
         id: version-info
         env:
-          NIGHTLY: ${{ inputs.nightly }}
+          NIGHTLY: ${{ inputs.nightly || false }}
         run: |
           git config --global --add safe.directory /__w/windows-chewing-tsf/windows-chewing-tsf
           nix/version.sh
@@ -83,7 +83,8 @@ jobs:
 
   package:
     name: Package (unsigned)
-    if: ${{ inputs.package }}
+    # `inputs` is empty on push events. Package branch pushes, but not tag pushes.
+    if: ${{ inputs.package || (github.event_name == 'push' && github.ref_type == 'branch') }}
     needs: [build]
     uses: ./.github/workflows/msi-build.yml
     with:
